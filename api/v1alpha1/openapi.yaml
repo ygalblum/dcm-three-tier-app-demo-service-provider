@@ -1,0 +1,275 @@
+openapi: 3.0.4
+info:
+  title: 3-Tier Demo Service Provider API
+  description: |
+    DCM service provider for 3-tier (web, app, db) demo stacks.
+    AEP-compliant REST API.
+  version: 1.0.0
+  contact:
+    name: DCM Project
+    url: https://github.com/dcm-project/3-tier-demo-service-provider
+  license:
+    name: Apache 2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: /api/v1alpha1
+    description: API v1alpha1
+
+tags:
+  - name: Health
+    description: Health check
+  - name: Stacks
+    description: 3-tier stack lifecycle
+
+paths:
+  /health:
+    get:
+      summary: Health Check
+      description: Returns the health status of the service
+      operationId: getHealth
+      tags:
+        - Health
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+
+  /stacks:
+    get:
+      summary: List Stacks
+      description: List 3-tier demo stacks with optional pagination
+      operationId: listStacks
+      tags:
+        - Stacks
+      parameters:
+        - name: max_page_size
+          in: query
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+            maximum: 100
+            default: 50
+        - name: page_token
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StackList'
+        '400':
+          description: Bad request
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Internal server error
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+    post:
+      summary: Create Stack
+      description: Create a new 3-tier demo stack
+      operationId: createStack
+      tags:
+        - Stacks
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Stack'
+      responses:
+        '201':
+          description: Stack created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Stack'
+        '400':
+          description: Bad request
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Conflict
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Internal server error
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /stacks/{stackId}:
+    get:
+      summary: Get Stack
+      description: Get a stack by ID
+      operationId: getStack
+      tags:
+        - Stacks
+      parameters:
+        - name: stackId
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Stack'
+        '404':
+          description: Not found
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Internal server error
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+    delete:
+      summary: Delete Stack
+      description: Delete a stack
+      operationId: deleteStack
+      tags:
+        - Stacks
+      parameters:
+        - name: stackId
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'
+      responses:
+        '204':
+          description: Deleted
+        '404':
+          description: Not found
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Internal server error
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+components:
+  schemas:
+    Health:
+      type: object
+      description: Health status
+      x-aep-resource:
+        singular: health
+        plural: healths
+        singleton: true
+        type: 3-tier-demo-service-provider.dcm.io/health
+        patterns:
+          - health
+      required:
+        - type
+        - state
+        - path
+      properties:
+        type:
+          type: string
+          format: uri-reference
+          readOnly: true
+          example: "3-tier-demo-service-provider.dcm.io/health"
+        state:
+          type: string
+          example: "healthy"
+        path:
+          type: string
+          readOnly: true
+          example: "health"
+
+    Stack:
+      type: object
+      description: A 3-tier demo stack (web, app, db)
+      x-aep-resource:
+        type: 3-tier-demo-service-provider.dcm.io/stack
+        singular: stack
+        plural: stacks
+        patterns:
+          - stacks/{stack_id}
+      required:
+        - name
+      properties:
+        id:
+          type: string
+          readOnly: true
+          pattern: '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'
+          description: Unique stack ID
+        path:
+          type: string
+          readOnly: true
+          description: Resource path
+        name:
+          type: string
+          description: Human-readable stack name
+          pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+        create_time:
+          type: string
+          format: date-time
+          readOnly: true
+        update_time:
+          type: string
+          format: date-time
+          readOnly: true
+
+    StackList:
+      type: object
+      properties:
+        stacks:
+          type: array
+          items:
+            $ref: '#/components/schemas/Stack'
+        next_page_token:
+          type: string
+
+    Error:
+      type: object
+      description: RFC 7807 problem details
+      required:
+        - type
+        - title
+      properties:
+        type:
+          type: string
+          format: uri-reference
+        title:
+          type: string
+        status:
+          type: integer
+          format: int32
+        detail:
+          type: string
+        instance:
+          type: string
+          format: uri-reference
