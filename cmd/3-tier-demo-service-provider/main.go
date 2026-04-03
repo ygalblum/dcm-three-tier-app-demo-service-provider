@@ -2,77 +2,128 @@ package main
 
 import (
 	"context"
-	"log"
+	"fmt"
 	"log/slog"
-	"net/http"
+	"net"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/dcm-project/3-tier-demo-service-provider/internal/api/server"
+	"github.com/dcm-project/3-tier-demo-service-provider/internal/apiserver"
 	"github.com/dcm-project/3-tier-demo-service-provider/internal/config"
 	"github.com/dcm-project/3-tier-demo-service-provider/internal/containerclient"
 	"github.com/dcm-project/3-tier-demo-service-provider/internal/handlers"
 	"github.com/dcm-project/3-tier-demo-service-provider/internal/registration"
+	"github.com/dcm-project/3-tier-demo-service-provider/internal/service"
 	"github.com/dcm-project/3-tier-demo-service-provider/internal/statusreport"
 	"github.com/dcm-project/3-tier-demo-service-provider/internal/store"
 	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
 )
 
 func main() {
-	cfg := config.Load()
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
-
-	var containerClient containerclient.ContainerClient
-	switch cfg.DevContainerBackend {
-	case "podman":
-		containerClient = &containerclient.PodmanClient{}
-		log.Println("Using Podman backend (real containers)")
-	case "":
-		if cfg.ContainerSPURL != "" {
-			httpClient, err := containerclient.NewHTTPClient(cfg.ContainerSPURL)
-			if err != nil {
-				logger.Error("failed to create container SP HTTP client", "error", err, "url", cfg.ContainerSPURL)
-				os.Exit(1)
-			}
-			containerClient = httpClient
-			log.Printf("Using k8s container SP at %s", cfg.ContainerSPURL)
-		} else {
-			containerClient = &containerclient.MockClient{}
-		}
-	default:
-		containerClient = &containerclient.MockClient{}
+	if err := run(logger); err != nil {
+		logger.Error("fatal error", "error", err)
+		os.Exit(1)
 	}
+}
+
+func run(_ *slog.Logger) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("loading config: %w", err)
+	}
+
+	logger := buildLogger(cfg.SVCLogLevel)
+
+	ln, err := net.Listen("tcp", cfg.SVCAddress)
+	if err != nil {
+		return fmt.Errorf("listening on %s: %w", cfg.SVCAddress, err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+
+	st, err := buildStore(cfg.Store)
+	if err != nil {
+		return fmt.Errorf("building store: %w", err)
+	}
+
+	containerClient, err := containerclient.New(cfg, logger)
+	if err != nil {
+		return err
+	}
+
+	var statusReporter service.StatusReporter
+	if cfg.NATS.URL != "" {
+		pub, err := statusreport.NewPublisher(cfg.NATS.URL, cfg.Provider.Name, logger)
+		if err != nil {
+			return fmt.Errorf("creating status publisher: %w", err)
+		}
+		defer func() { _ = pub.Close() }()
+		statusReporter = pub
+		logger.Info("status reporting enabled", "nats_url", cfg.NATS.URL)
+	}
+
+	svc := service.New(st, containerClient, statusReporter)
+	h := &handlers.Handlers{Svc: svc}
+
+	r := chi.NewRouter()
+	_ = server.HandlerFromMuxWithBaseURL(server.NewStrictHandler(h, nil), r, "/api/v1alpha1")
+
+	srv := apiserver.New(cfg.SVCAddress, r, logger)
 
 	if cfg.RegistrationEnabled() {
 		registrar, err := registration.NewRegistrar(&cfg, logger)
 		if err != nil {
-			logger.Error("failed to create registrar", "error", err)
-			os.Exit(1)
+			return fmt.Errorf("creating registrar: %w", err)
 		}
-		registrar.Start(context.Background())
-		logger.Info("DCM registration started in background")
+		srv = srv.WithOnReady(func(ctx context.Context) {
+			registrar.Start(ctx)
+			logger.Info("DCM registration started")
+		})
 	}
 
-	var statusReporter handlers.StatusReporter
-	if cfg.DCM.StatusReportURL != "" {
-		pub, err := statusreport.NewPublisher(cfg.DCM.StatusReportURL, cfg.Provider.Name)
+	logger.Info("server ready", "address", ln.Addr().String())
+	return srv.Run(ctx, ln)
+}
+
+func buildLogger(level string) *slog.Logger {
+	var lvl slog.Level
+	switch level {
+	case "debug":
+		lvl = slog.LevelDebug
+	case "warn":
+		lvl = slog.LevelWarn
+	case "error":
+		lvl = slog.LevelError
+	default:
+		lvl = slog.LevelInfo
+	}
+	return slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: lvl}))
+}
+
+func buildStore(cfg config.StoreConfig) (store.AppStore, error) {
+	switch cfg.Type {
+	case "pgsql", "":
+		dsn := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
+			cfg.Host, cfg.Port, cfg.User, cfg.Pass, cfg.Name)
+		s, err := store.NewPostgresStore(dsn)
 		if err != nil {
-			logger.Error("failed to create status publisher", "error", err)
-			os.Exit(1)
+			return nil, fmt.Errorf("postgres store: %w", err)
 		}
-		statusReporter = pub
-		log.Printf("Status reporting enabled: %s", cfg.DCM.StatusReportURL)
+		return s, nil
+	case "sqlite":
+		s, err := store.NewSQLiteStore(cfg.Path)
+		if err != nil {
+			return nil, fmt.Errorf("sqlite store at %s: %w", cfg.Path, err)
+		}
+		return s, nil
+	case "memory":
+		return store.NewMemoryStore(), nil
+	default:
+		return nil, fmt.Errorf("unknown DB_TYPE %q (valid: pgsql, sqlite, memory)", cfg.Type)
 	}
-
-	h := &handlers.Handlers{
-		Store:     store.NewMemoryStore(),
-		Container: containerClient,
-		Status:    statusReporter,
-	}
-
-	r := chi.NewRouter()
-	r.Use(middleware.Logger)
-	_ = server.HandlerFromMuxWithBaseURL(h, r, "/api/v1alpha1")
-	log.Printf("Listening on %s", cfg.SVCAddress)
-	log.Fatal(http.ListenAndServe(cfg.SVCAddress, r))
 }

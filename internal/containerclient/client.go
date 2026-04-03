@@ -2,10 +2,39 @@ package containerclient
 
 import (
 	"context"
+	"fmt"
+	"log/slog"
 
 	"github.com/dcm-project/3-tier-demo-service-provider/api/v1alpha1"
+	"github.com/dcm-project/3-tier-demo-service-provider/internal/config"
 )
 
+// New returns a ContainerClient based on the application config.
+// Selection order: DEV_CONTAINER_BACKEND=podman → PodmanClient,
+// CONTAINER_SP_URL set → HTTPClient, otherwise MockClient.
+func New(cfg config.Config, logger *slog.Logger) (ContainerClient, error) {
+	switch cfg.DevContainerBackend {
+	case "podman":
+		logger.Info("using Podman backend")
+		return &PodmanClient{
+			StackDB:     cfg.StackDB,
+			WebHostPort: cfg.PodmanWebHostPort,
+		}, nil
+	case "":
+		if cfg.ContainerSPURL != "" {
+			c, err := NewHTTPClient(cfg.ContainerSPURL, cfg.StackDB)
+			if err != nil {
+				return nil, fmt.Errorf("creating container SP HTTP client: %w", err)
+			}
+			logger.Info("using k8s container SP", "url", cfg.ContainerSPURL)
+			return c, nil
+		}
+		logger.Info("using mock backend")
+		return &MockClient{}, nil
+	default:
+		return nil, fmt.Errorf("unknown DEV_CONTAINER_BACKEND %q (valid: podman, or empty for mock/k8s SP)", cfg.DevContainerBackend)
+	}
+}
 // ContainerClient creates and deletes containers via a container SP or Podman.
 // When CONTAINER_SP_URL is empty, use MockClient or PodmanClient per DEV_CONTAINER_BACKEND.
 type ContainerClient interface {

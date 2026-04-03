@@ -29,7 +29,6 @@ func NewHTTPClient(baseURL string, stackDB config.StackDBConfig) (*HTTPClient, e
 	return &HTTPClient{Client: client, StackDB: stackDB}, nil
 }
 
-// visibility is required by the k8s container SP OpenAPI for each port (internal | external | none).
 func tierPorts(net *v1alpha1.TierNetwork, defaultPort int, visibility k8sapi.ContainerPortVisibility) []k8sapi.ContainerPort {
 	if net != nil && net.Ports != nil && len(*net.Ports) > 0 {
 		out := make([]k8sapi.ContainerPort, len(*net.Ports))
@@ -122,21 +121,20 @@ func (h *HTTPClient) CreateContainers(ctx context.Context, stackID string, spec 
 	ids := make([]string, 0, len(tiers))
 	for _, t := range tiers {
 		ports := t.ports
-		cs := k8sapi.ContainerSpec{
-			ServiceType: k8sapi.ContainerSpecServiceTypeContainer,
-			Metadata:    k8sapi.ContainerMetadata{Name: t.id},
-			Image:       k8sapi.ContainerImage{Reference: t.image},
-			Resources: k8sapi.ContainerResources{
-				Cpu:    k8sapi.ContainerCpu{Min: 1, Max: 2},
-				Memory: k8sapi.ContainerMemory{Min: "256MB", Max: "512MB"},
+		body := k8sapi.Container{
+			Spec: k8sapi.ContainerSpec{
+				ServiceType: k8sapi.ContainerSpecServiceTypeContainer,
+				Metadata:    k8sapi.ContainerMetadata{Name: t.id},
+				Image:       k8sapi.ContainerImage{Reference: t.image},
+				Resources: k8sapi.ContainerResources{
+					Cpu:    k8sapi.ContainerCpu{Min: 1, Max: 2},
+					Memory: k8sapi.ContainerMemory{Min: "256MB", Max: "512MB"},
+				},
+				Network: &k8sapi.ContainerNetwork{Ports: &ports},
 			},
-			Network: &k8sapi.ContainerNetwork{Ports: &ports},
 		}
 		if t.process != nil {
-			cs.Process = t.process
-		}
-		body := k8sapi.Container{
-			Spec: cs,
+			body.Spec.Process = t.process
 		}
 		idParam := t.id
 		resp, err := h.Client.CreateContainerWithResponse(ctx, &k8sapi.CreateContainerParams{Id: &idParam}, body)

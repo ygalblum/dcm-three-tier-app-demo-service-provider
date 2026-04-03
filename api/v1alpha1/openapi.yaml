@@ -371,14 +371,28 @@ components:
 
     ContainerPort:
       type: object
+      additionalProperties: true
       required:
         - container_port
+        - visibility
       properties:
         container_port:
           type: integer
           minimum: 1
           maximum: 65535
           example: 8080
+        visibility:
+          type: string
+          description: |
+            How this port is exposed to consumers.
+            - none: Port is not exposed outside the container process
+            - internal: Exposed to the host or cluster network
+            - external: Reachable from outside the host/cluster
+          enum:
+            - none
+            - internal
+            - external
+          example: internal
 
     Error:
       type: object

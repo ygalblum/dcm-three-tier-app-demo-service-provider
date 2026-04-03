@@ -4,7 +4,16 @@
 package v1alpha1
 
 import (
+	"encoding/json"
+	"fmt"
 	"time"
+)
+
+// Defines values for ContainerPortVisibility.
+const (
+	External ContainerPortVisibility = "external"
+	Internal ContainerPortVisibility = "internal"
+	None     ContainerPortVisibility = "none"
 )
 
 // Defines values for ThreeTierAppServiceType.
@@ -30,7 +39,20 @@ type AppTierSpec struct {
 // ContainerPort defines model for ContainerPort.
 type ContainerPort struct {
 	ContainerPort int `json:"container_port"`
+
+	// Visibility How this port is exposed to consumers.
+	// - none: Port is not exposed outside the container process
+	// - internal: Exposed to the host or cluster network
+	// - external: Reachable from outside the host/cluster
+	Visibility           ContainerPortVisibility `json:"visibility"`
+	AdditionalProperties map[string]interface{}  `json:"-"`
 }
+
+// ContainerPortVisibility How this port is exposed to consumers.
+// - none: Port is not exposed outside the container process
+// - internal: Exposed to the host or cluster network
+// - external: Reachable from outside the host/cluster
+type ContainerPortVisibility string
 
 // DatabaseTierSpec Database tier. Uses abstract identifiers (engine, version) only.
 // SP maps engine+version to OCI image (e.g. postgres+16 -> docker.io/library/postgres:16).
@@ -142,3 +164,82 @@ type CreateThreeTierAppParams struct {
 
 // CreateThreeTierAppJSONRequestBody defines body for CreateThreeTierApp for application/json ContentType.
 type CreateThreeTierAppJSONRequestBody = ThreeTierApp
+
+// Getter for additional properties for ContainerPort. Returns the specified
+// element and whether it was found
+func (a ContainerPort) Get(fieldName string) (value interface{}, found bool) {
+	if a.AdditionalProperties != nil {
+		value, found = a.AdditionalProperties[fieldName]
+	}
+	return
+}
+
+// Setter for additional properties for ContainerPort
+func (a *ContainerPort) Set(fieldName string, value interface{}) {
+	if a.AdditionalProperties == nil {
+		a.AdditionalProperties = make(map[string]interface{})
+	}
+	a.AdditionalProperties[fieldName] = value
+}
+
+// Override default JSON handling for ContainerPort to handle AdditionalProperties
+func (a *ContainerPort) UnmarshalJSON(b []byte) error {
+	object := make(map[string]json.RawMessage)
+	err := json.Unmarshal(b, &object)
+	if err != nil {
+		return err
+	}
+
+	if raw, found := object["container_port"]; found {
+		err = json.Unmarshal(raw, &a.ContainerPort)
+		if err != nil {
+			return fmt.Errorf("error reading 'container_port': %w", err)
+		}
+		delete(object, "container_port")
+	}
+
+	if raw, found := object["visibility"]; found {
+		err = json.Unmarshal(raw, &a.Visibility)
+		if err != nil {
+			return fmt.Errorf("error reading 'visibility': %w", err)
+		}
+		delete(object, "visibility")
+	}
+
+	if len(object) != 0 {
+		a.AdditionalProperties = make(map[string]interface{})
+		for fieldName, fieldBuf := range object {
+			var fieldVal interface{}
+			err := json.Unmarshal(fieldBuf, &fieldVal)
+			if err != nil {
+				return fmt.Errorf("error unmarshaling field %s: %w", fieldName, err)
+			}
+			a.AdditionalProperties[fieldName] = fieldVal
+		}
+	}
+	return nil
+}
+
+// Override default JSON handling for ContainerPort to handle AdditionalProperties
+func (a ContainerPort) MarshalJSON() ([]byte, error) {
+	var err error
+	object := make(map[string]json.RawMessage)
+
+	object["container_port"], err = json.Marshal(a.ContainerPort)
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling 'container_port': %w", err)
+	}
+
+	object["visibility"], err = json.Marshal(a.Visibility)
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling 'visibility': %w", err)
+	}
+
+	for fieldName, field := range a.AdditionalProperties {
+		object[fieldName], err = json.Marshal(field)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling '%s': %w", fieldName, err)
+		}
+	}
+	return json.Marshal(object)
+}

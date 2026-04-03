@@ -19,15 +19,15 @@ type Config struct {
 	// when using the Podman backend (e.g. "8081"). Empty = no host publish,
 	// avoiding conflicts with other services (ygalblum).
 	PodmanWebHostPort   string         `env:"PODMAN_WEB_HOST_PORT"`
-	StackDB             StackDBConfig  `envPrefix:"TIER_STACK_"`
+	StackDB             StackDBCfg     `envPrefix:"TIER_STACK_"`
 	DCM                 DCMConfig      `envPrefix:"SP_DCM_"`
 	NATS                NATSConfig     `envPrefix:"SP_NATS_"`
 	Provider            ProviderConfig `envPrefix:"SP_PROVIDER_"`
 	Store               StoreConfig    `envPrefix:"DB_"`
 }
 
-// StackDBConfig holds credentials for the provisioned DB/app tiers.
-type StackDBConfig struct {
+// StackDBCfg holds credentials for the provisioned DB/app tiers.
+type StackDBCfg struct {
 	Password     string `env:"DB_PASSWORD"    envDefault:"petclinic"`
 	DatabaseName string `env:"DB_NAME"        envDefault:"petclinic"`
 	PostgresUser string `env:"POSTGRES_USER"  envDefault:"postgres"`

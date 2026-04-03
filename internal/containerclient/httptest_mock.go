@@ -73,10 +73,15 @@ func (s *mockServerState) handleCreate(w http.ResponseWriter, r *http.Request) {
 	resp := k8sapi.Container{
 		Id:         &id,
 		Path:       ptr("containers/" + id),
-		Spec:       body.Spec,
 		Status:     ptr(k8sapi.RUNNING),
 		CreateTime: &now,
 		UpdateTime: &now,
+		Spec: k8sapi.ContainerSpec{
+			ServiceType: k8sapi.ContainerSpecServiceTypeContainer,
+			Metadata:    body.Spec.Metadata,
+			Image:       body.Spec.Image,
+			Resources:   body.Spec.Resources,
+		},
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
@@ -96,9 +101,11 @@ func (s *mockServerState) handleGet(w http.ResponseWriter, id string) {
 	now := time.Now()
 	st := k8sapi.RUNNING
 	resp := k8sapi.Container{
-		Id:     &id,
-		Path:   ptr("containers/" + id),
-		Status: &st,
+		Id:         &id,
+		Path:       ptr("containers/" + id),
+		Status:     &st,
+		CreateTime: &now,
+		UpdateTime: &now,
 		Spec: k8sapi.ContainerSpec{
 			ServiceType: k8sapi.ContainerSpecServiceTypeContainer,
 			Metadata:    k8sapi.ContainerMetadata{Name: id},
@@ -108,8 +115,6 @@ func (s *mockServerState) handleGet(w http.ResponseWriter, id string) {
 				Memory: k8sapi.ContainerMemory{Min: "256MB", Max: "512MB"},
 			},
 		},
-		CreateTime: &now,
-		UpdateTime: &now,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
