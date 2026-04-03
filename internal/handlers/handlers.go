@@ -1,217 +1,125 @@
+// Package handlers implements StrictServerInterface; HTTP input validation
+// and response mapping only — all business logic lives in service.ThreeTierAppService.
 package handlers
 
 import (
 	"context"
-	"encoding/json"
-	"net/http"
+	"errors"
+	"fmt"
 	"regexp"
-	"time"
 
 	"github.com/dcm-project/3-tier-demo-service-provider/api/v1alpha1"
-	"github.com/dcm-project/3-tier-demo-service-provider/internal/containerclient"
-	"github.com/dcm-project/3-tier-demo-service-provider/internal/statusreport"
-	"github.com/dcm-project/3-tier-demo-service-provider/internal/store"
+	"github.com/dcm-project/3-tier-demo-service-provider/internal/api/server"
+	"github.com/dcm-project/3-tier-demo-service-provider/internal/service"
 )
 
-// StatusReporter publishes status to DCM. When nil, reporting is disabled.
-type StatusReporter interface {
-	Publish(ctx context.Context, instanceID, status, message string)
-	PublishDeleted(ctx context.Context, instanceID string)
+// Handlers implements server.StrictServerInterface.
+type Handlers struct {
+	Svc *service.ThreeTierAppService
 }
 
-// Handlers implements server.ServerInterface.
-type Handlers struct {
-	Store     store.StackStore
-	Container containerclient.ContainerClient
-	Status    StatusReporter
-}
+var _ server.StrictServerInterface = (*Handlers)(nil)
 
 var idPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
-func (h *Handlers) GetHealth(w http.ResponseWriter, r *http.Request) {
+func (h *Handlers) GetHealth(_ context.Context, _ server.GetHealthRequestObject) (server.GetHealthResponseObject, error) {
 	path := "health"
 	ht := "3-tier-demo-service-provider.dcm.io/health"
-	resp := v1alpha1.Health{
+	return server.GetHealth200JSONResponse(v1alpha1.Health{
 		Type:  &ht,
 		State: "healthy",
 		Path:  &path,
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(resp)
+	}), nil
 }
 
-func (h *Handlers) ListThreeTierApps(w http.ResponseWriter, r *http.Request, params v1alpha1.ListThreeTierAppsParams) {
+func (h *Handlers) ListThreeTierApps(ctx context.Context, req server.ListThreeTierAppsRequestObject) (server.ListThreeTierAppsResponseObject, error) {
 	maxPageSize := int32(50)
-	if params.MaxPageSize != nil && *params.MaxPageSize >= 1 && *params.MaxPageSize <= 100 {
-		maxPageSize = *params.MaxPageSize
+	if req.Params.MaxPageSize != nil && *req.Params.MaxPageSize >= 1 && *req.Params.MaxPageSize <= 100 {
+		maxPageSize = *req.Params.MaxPageSize
 	}
-	offset := 0
-	if params.PageToken != nil && *params.PageToken != "" {
-		// simple offset-based pagination
-		offset = 0 // TODO: decode page_token
-	}
-	stacks, hasMore := h.Store.List(r.Context(), int(maxPageSize), offset)
-	list := make([]v1alpha1.Stack, len(stacks))
-	for i, s := range stacks {
-		list[i] = s
-		if s.Id != nil {
-			if status, ok := h.Container.GetStatus(r.Context(), *s.Id); ok {
-				list[i].Status = status
-				if h.Status != nil {
-					dcm := statusreport.ToDCMStatus(string(status))
-					h.Status.Publish(r.Context(), *s.Id, dcm, statusMessage(dcm))
-				}
-			}
-		}
-	}
+	// TODO: decode page_token for cursor-based pagination
+	_ = req.Params.PageToken
+
+	apps, hasMore := h.Svc.List(ctx, int(maxPageSize), 0)
+	list := make([]v1alpha1.ThreeTierApp, len(apps))
+	copy(list, apps)
+
 	var nextToken *string
 	if hasMore {
 		t := ""
 		nextToken = &t
 	}
-	resp := v1alpha1.StackList{Stacks: &list, NextPageToken: nextToken}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(resp)
+	return server.ListThreeTierApps200JSONResponse(v1alpha1.ThreeTierAppList{
+		ThreeTierApps: &list,
+		NextPageToken: nextToken,
+	}), nil
 }
 
-func (h *Handlers) CreateThreeTierApp(w http.ResponseWriter, r *http.Request, params v1alpha1.CreateThreeTierAppParams) {
-	var req v1alpha1.CreateStackRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "Invalid request body", err.Error())
-		return
+func (h *Handlers) CreateThreeTierApp(ctx context.Context, req server.CreateThreeTierAppRequestObject) (server.CreateThreeTierAppResponseObject, error) {
+	body := req.Body
+
+	if !idPattern.MatchString(body.Metadata.Name) {
+		return server.CreateThreeTierApp400ApplicationProblemPlusJSONResponse(
+			errBody("Invalid name", "metadata.name must match "+idPattern.String()),
+		), nil
 	}
-	id := req.Metadata.Name
-	if params.Id != nil && *params.Id != "" {
-		if !idPattern.MatchString(*params.Id) {
-			writeError(w, http.StatusBadRequest, "Invalid id", "id must match pattern")
-			return
+	id := body.Metadata.Name
+	if req.Params.Id != nil && *req.Params.Id != "" {
+		if !idPattern.MatchString(*req.Params.Id) {
+			return server.CreateThreeTierApp400ApplicationProblemPlusJSONResponse(
+				errBody("Invalid id", "id must match "+idPattern.String()),
+			), nil
 		}
-		id = *params.Id
-	}
-	if !idPattern.MatchString(id) {
-		writeError(w, http.StatusBadRequest, "Invalid name", "metadata.name must match pattern")
-		return
+		id = *req.Params.Id
 	}
 
-	if existing, ok := h.Store.Get(r.Context(), id); ok {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(existing)
-		return
-	}
-
-	dbID, appID, webID, err := h.Container.CreateContainers(r.Context(), id, req.Spec)
+	app, err := h.Svc.Create(ctx, id, body.Spec)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "Container creation failed", err.Error())
-		return
-	}
-	_ = dbID
-	_ = appID
-	_ = webID
-
-	now := time.Now()
-	path := "three-tier-apps/" + id
-	status := v1alpha1.RUNNING
-	stack := v1alpha1.Stack{
-		Id:         &id,
-		Path:       &path,
-		Spec:       req.Spec,
-		Status:     status,
-		CreateTime: &now,
-		UpdateTime: &now,
-	}
-
-	created, err := h.Store.Create(r.Context(), stack)
-	if err != nil {
-		if err == store.ErrStackExists {
-			existing, _ := h.Store.Get(r.Context(), id)
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
-			_ = json.NewEncoder(w).Encode(existing)
-			return
+		if errors.Is(err, service.ErrConflict) {
+			return server.CreateThreeTierApp409ApplicationProblemPlusJSONResponse(
+				errBody("Conflict", fmt.Sprintf("3-tier app %q already exists", id)),
+			), nil
 		}
-		writeError(w, http.StatusConflict, "Stack exists", err.Error())
-		return
+		return server.CreateThreeTierApp500ApplicationProblemPlusJSONResponse(
+			errBody("Create failed", err.Error()),
+		), nil
 	}
-
-	if h.Status != nil {
-		h.Status.Publish(r.Context(), id, statusreport.StatusRunning, "3-tier app running")
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	_ = json.NewEncoder(w).Encode(created)
+	return server.CreateThreeTierApp201JSONResponse(app), nil
 }
 
-func (h *Handlers) GetThreeTierApp(w http.ResponseWriter, r *http.Request, threeTierAppId string) {
-	stack, found := h.Store.Get(r.Context(), threeTierAppId)
-	if !found {
-		writeError(w, http.StatusNotFound, "Not found", "3-tier app not found")
-		return
-	}
-	if status, ok := h.Container.GetStatus(r.Context(), threeTierAppId); ok {
-		stack.Status = status
-		if h.Status != nil {
-			dcm := statusreport.ToDCMStatus(string(status))
-			h.Status.Publish(r.Context(), threeTierAppId, dcm, statusMessage(dcm))
-		}
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(stack)
-}
-
-func (h *Handlers) DeleteThreeTierApp(w http.ResponseWriter, r *http.Request, threeTierAppId string) {
-	_, ok := h.Store.Get(r.Context(), threeTierAppId)
-	if !ok {
-		writeError(w, http.StatusNotFound, "Not found", "3-tier app not found")
-		return
-	}
-	if err := h.Container.DeleteContainers(r.Context(), threeTierAppId); err != nil {
-		writeError(w, http.StatusInternalServerError, "Container deletion failed", err.Error())
-		return
-	}
-	deleted, err := h.Store.Delete(r.Context(), threeTierAppId)
+func (h *Handlers) GetThreeTierApp(ctx context.Context, req server.GetThreeTierAppRequestObject) (server.GetThreeTierAppResponseObject, error) {
+	app, err := h.Svc.Get(ctx, req.ThreeTierAppId)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "Delete failed", err.Error())
-		return
+		if errors.Is(err, service.ErrNotFound) {
+			return server.GetThreeTierApp404ApplicationProblemPlusJSONResponse(
+				errBody("Not found", "3-tier app not found"),
+			), nil
+		}
+		return server.GetThreeTierApp500ApplicationProblemPlusJSONResponse(
+			errBody("Get failed", err.Error()),
+		), nil
 	}
-	if !deleted {
-		writeError(w, http.StatusNotFound, "Not found", "3-tier app not found")
-		return
-	}
-	if h.Status != nil {
-		h.Status.PublishDeleted(r.Context(), threeTierAppId)
-	}
-	w.WriteHeader(http.StatusNoContent)
+	return server.GetThreeTierApp200JSONResponse(app), nil
 }
 
-func statusMessage(status string) string {
-	switch status {
-	case statusreport.StatusRunning:
-		return "3-tier app running"
-	case statusreport.StatusPending:
-		return "3-tier app pending"
-	case statusreport.StatusFailed:
-		return "3-tier app failed"
-	case statusreport.StatusUnknown:
-		return "3-tier app status unknown"
-	default:
-		return "3-tier app " + status
+func (h *Handlers) DeleteThreeTierApp(ctx context.Context, req server.DeleteThreeTierAppRequestObject) (server.DeleteThreeTierAppResponseObject, error) {
+	if err := h.Svc.Delete(ctx, req.ThreeTierAppId); err != nil {
+		if errors.Is(err, service.ErrNotFound) {
+			return server.DeleteThreeTierApp404ApplicationProblemPlusJSONResponse(
+				errBody("Not found", "3-tier app not found"),
+			), nil
+		}
+		return server.DeleteThreeTierApp500ApplicationProblemPlusJSONResponse(
+			errBody("Delete failed", err.Error()),
+		), nil
 	}
+	return server.DeleteThreeTierApp204Response{}, nil
 }
 
-func writeError(w http.ResponseWriter, status int, title, detail string) {
-	w.Header().Set("Content-Type", "application/problem+json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v1alpha1.Error{
+func errBody(title, detail string) v1alpha1.Error {
+	return v1alpha1.Error{
 		Type:   "about:blank",
 		Title:  title,
-		Status: ptr(int32(status)),
 		Detail: &detail,
-	})
+	}
 }
-
-func ptr[T any](v T) *T { return &v }
