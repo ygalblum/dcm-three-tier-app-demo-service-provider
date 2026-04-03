@@ -1,66 +1,85 @@
+// Package config loads service configuration from environment variables using
+// github.com/caarlos0/env/v11 (per ygalblum review).
 package config
 
 import (
-	"os"
-	"strings"
+	"fmt"
+
+	env "github.com/caarlos0/env/v11"
+	"github.com/joho/godotenv"
 )
 
-// Config holds service configuration.
+// Config holds all service configuration.
 type Config struct {
-	// ContainerSPURL is the base URL of the container SP. Empty = use mock or podman.
-	ContainerSPURL string
-	// DevContainerBackend selects backend when CONTAINER_SP_URL is empty: "podman" = real containers, "mock" or empty = in-memory mock.
-	DevContainerBackend string
-	// SVCAddress is the listen address (e.g. ":8080"). Default ":8080".
-	SVCAddress string
-	// DCM holds DCM registration settings. When RegistrationURL is set, SP self-registers on startup.
-	DCM DCMConfig
-	// Provider holds SP identity for registration.
-	Provider ProviderConfig
+	SVCAddress          string         `env:"SVC_ADDRESS"          envDefault:":8080"`
+	SVCLogLevel         string         `env:"SVC_LOG_LEVEL"        envDefault:"info"`
+	ContainerSPURL      string         `env:"CONTAINER_SP_URL"`
+	DevContainerBackend string         `env:"DEV_CONTAINER_BACKEND"`
+	// PodmanWebHostPort publishes the nginx web container to this host port
+	// when using the Podman backend (e.g. "8081"). Empty = no host publish,
+	// avoiding conflicts with other services (ygalblum).
+	PodmanWebHostPort   string         `env:"PODMAN_WEB_HOST_PORT"`
+	StackDB             StackDBConfig  `envPrefix:"TIER_STACK_"`
+	DCM                 DCMConfig      `envPrefix:"SP_DCM_"`
+	NATS                NATSConfig     `envPrefix:"SP_NATS_"`
+	Provider            ProviderConfig `envPrefix:"SP_PROVIDER_"`
+	Store               StoreConfig    `envPrefix:"DB_"`
+}
+
+// StackDBConfig holds credentials for the provisioned DB/app tiers.
+type StackDBConfig struct {
+	Password     string `env:"DB_PASSWORD"    envDefault:"petclinic"`
+	DatabaseName string `env:"DB_NAME"        envDefault:"petclinic"`
+	PostgresUser string `env:"POSTGRES_USER"  envDefault:"postgres"`
+	MysqlUser    string `env:"MYSQL_USER"     envDefault:"root"`
 }
 
 // DCMConfig holds DCM registry connection settings.
 type DCMConfig struct {
-	RegistrationURL string
-	// StatusReportURL is the URL to POST CloudEvents for status updates (per service-provider-status-reporting).
-	// When set, the SP publishes status changes to DCM.
-	StatusReportURL string
+	RegistrationURL string `env:"REGISTRATION_URL"`
 }
 
-// ProviderConfig holds service provider identity for registration.
+// NATSConfig holds NATS connection settings for status event publishing.
+type NATSConfig struct {
+	URL string `env:"URL"`
+}
+
+// ProviderConfig holds SP identity for self-registration.
 type ProviderConfig struct {
-	Name        string
-	DisplayName string
-	Endpoint    string
-	Region      string
-	Zone        string
+	Name        string `env:"NAME"`
+	DisplayName string `env:"DISPLAY_NAME"`
+	Endpoint    string `env:"ENDPOINT"`
+	Region      string `env:"REGION"`
+	Zone        string `env:"ZONE"`
 }
 
-// Load reads config from environment.
-func Load() Config {
-	addr := strings.TrimSpace(os.Getenv("SVC_ADDRESS"))
-	if addr == "" {
-		addr = ":8080"
-	}
-	return Config{
-		ContainerSPURL:    strings.TrimSpace(os.Getenv("CONTAINER_SP_URL")),
-		DevContainerBackend: strings.TrimSpace(strings.ToLower(os.Getenv("DEV_CONTAINER_BACKEND"))),
-		SVCAddress:        addr,
-		DCM: DCMConfig{
-			RegistrationURL:  strings.TrimSpace(os.Getenv("SP_DCM_REGISTRATION_URL")),
-			StatusReportURL:  strings.TrimSpace(os.Getenv("STATUS_REPORT_URL")),
-		},
-		Provider: ProviderConfig{
-			Name:        strings.TrimSpace(os.Getenv("SP_PROVIDER_NAME")),
-			DisplayName: strings.TrimSpace(os.Getenv("SP_PROVIDER_DISPLAY_NAME")),
-			Endpoint:    strings.TrimSpace(os.Getenv("SP_PROVIDER_ENDPOINT")),
-			Region:      strings.TrimSpace(os.Getenv("SP_PROVIDER_REGION")),
-			Zone:        strings.TrimSpace(os.Getenv("SP_PROVIDER_ZONE")),
-		},
-	}
+// StoreConfig holds the SP's own persistence settings.
+// DB_TYPE selects the backend: "pgsql" (default) or "sqlite".
+type StoreConfig struct {
+	Type string `env:"TYPE" envDefault:"pgsql"`
+	// Path is the SQLite database file path (used when TYPE=sqlite).
+	Path string `env:"PATH" envDefault:"three-tier-sp.db"`
+	Host string `env:"HOST" envDefault:"localhost"`
+	Port string `env:"PORT" envDefault:"5432"`
+	Name string `env:"NAME" envDefault:"three-tier-sp"`
+	User string `env:"USER" envDefault:"admin"`
+	Pass string `env:"PASS"`
 }
 
-// RegistrationEnabled returns true when all required registration config is set.
+// Load reads configuration from environment variables.
+// If a .env file exists in the current working directory it is loaded first
+// (missing file is OK). The file is loaded via godotenv before env parsing so
+// values are visible to the caarlos0/env parser.
+func Load() (Config, error) {
+	_ = godotenv.Load()
+	var cfg Config
+	if err := env.Parse(&cfg); err != nil {
+		return Config{}, fmt.Errorf("loading config: %w", err)
+	}
+	return cfg, nil
+}
+
+// RegistrationEnabled returns true when all required registration fields are set.
 func (c Config) RegistrationEnabled() bool {
 	return c.DCM.RegistrationURL != "" && c.Provider.Name != "" && c.Provider.Endpoint != ""
 }
