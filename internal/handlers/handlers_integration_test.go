@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sync"
 	"testing"
 
@@ -14,6 +15,7 @@ import (
 
 	"github.com/dcm-project/3-tier-demo-service-provider/api/v1alpha1"
 	"github.com/dcm-project/3-tier-demo-service-provider/internal/api/server"
+	"github.com/dcm-project/3-tier-demo-service-provider/internal/config"
 	"github.com/dcm-project/3-tier-demo-service-provider/internal/containerclient"
 	"github.com/dcm-project/3-tier-demo-service-provider/internal/handlers"
 	"github.com/dcm-project/3-tier-demo-service-provider/internal/service"
@@ -29,7 +31,7 @@ type statusOverrideClient struct {
 	mu       sync.RWMutex
 }
 
-func (c *statusOverrideClient) CreateContainers(ctx context.Context, stackID string, spec v1alpha1.ThreeTierSpec) (string, string, string, error) {
+func (c *statusOverrideClient) CreateContainers(ctx context.Context, stackID string, spec v1alpha1.ThreeTierSpec) error {
 	return c.inner.CreateContainers(ctx, stackID, spec)
 }
 
@@ -101,6 +103,18 @@ func (m *mockStatusReporter) getDeletedCalls() []string {
 	return out
 }
 
+func newTestStore() store.AppStore {
+	f, err := os.CreateTemp("", "handlers-test-*.db")
+	Expect(err).NotTo(HaveOccurred())
+	path := f.Name()
+	Expect(f.Close()).To(Succeed())
+	DeferCleanup(func() { _ = os.Remove(path) })
+
+	st, err := store.New(config.StoreConfig{Type: "sqlite", Path: path}, "")
+	Expect(err).NotTo(HaveOccurred())
+	return st
+}
+
 func TestHandlers(t *testing.T) {
 	RegisterFailHandler(Fail)
 	RunSpecs(t, "Handlers Suite")
@@ -114,7 +128,7 @@ var _ = Describe("Handlers with MockClient and status reporting", func() {
 
 	BeforeEach(func() {
 		reporter = &mockStatusReporter{}
-		svc := service.New(store.NewMemoryStore(), &containerclient.MockClient{}, reporter)
+		svc := service.New(newTestStore(), &containerclient.MockClient{}, reporter)
 		h := &handlers.Handlers{Svc: svc}
 		r := chi.NewRouter()
 		_ = server.HandlerFromMuxWithBaseURL(server.NewStrictHandler(h, nil), r, "/api/v1alpha1")
@@ -147,7 +161,7 @@ var _ = Describe("Handlers with MockClient and status reporting", func() {
 		Expect(stack.Spec.Database.Version).To(Equal("8"))
 	})
 
-	It("publishes RUNNING on create when status reporter is set", func() {
+	It("returns status PENDING on create (provisioning is async)", func() {
 		req := v1alpha1.ThreeTierApp{
 			Metadata: v1alpha1.ThreeTierAppMetadata{Name: "test-stack"},
 			Spec: v1alpha1.ThreeTierSpec{
@@ -161,13 +175,17 @@ var _ = Describe("Handlers with MockClient and status reporting", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(resp.StatusCode).To(Equal(http.StatusCreated))
 
-		calls := reporter.getPublishCalls()
-		Expect(calls).To(HaveLen(1))
-		Expect(calls[0].InstanceID).To(Equal("test-stack"))
-		Expect(calls[0].Status).To(Equal("RUNNING"))
+		var stack v1alpha1.ThreeTierApp
+		Expect(json.NewDecoder(resp.Body).Decode(&stack)).To(Succeed())
+		Expect(stack.Status).To(HaveValue(Equal(v1alpha1.PENDING)))
+
+		// Provisioning goroutine publishes RUNNING asynchronously.
+		Eventually(reporter.getPublishCalls, "2s", "10ms").Should(ContainElement(
+			WithTransform(func(c publishCall) string { return c.Status }, Equal("RUNNING")),
+		))
 	})
 
-	It("returns status from MockClient on GET and publishes to reporter", func() {
+	It("returns live container status on GET", func() {
 		req := v1alpha1.ThreeTierApp{
 			Metadata: v1alpha1.ThreeTierAppMetadata{Name: "get-status-stack"},
 			Spec: v1alpha1.ThreeTierSpec{
@@ -180,20 +198,21 @@ var _ = Describe("Handlers with MockClient and status reporting", func() {
 		_, err := http.Post(srv.URL+"/api/v1alpha1/three-tier-apps", "application/json", bytes.NewReader(body))
 		Expect(err).NotTo(HaveOccurred())
 
-		resp, err := http.Get(srv.URL + "/api/v1alpha1/three-tier-apps/get-status-stack")
-		Expect(err).NotTo(HaveOccurred())
-		Expect(resp.StatusCode).To(Equal(http.StatusOK))
-
-		var stack v1alpha1.ThreeTierApp
-		Expect(json.NewDecoder(resp.Body).Decode(&stack)).To(Succeed())
-		Expect(stack.Status).To(HaveValue(Equal(v1alpha1.RUNNING)))
-
-		calls := reporter.getPublishCalls()
-		Expect(calls).To(ContainElement(WithTransform(func(c publishCall) string { return c.InstanceID }, Equal("get-status-stack"))))
-		Expect(calls).To(ContainElement(WithTransform(func(c publishCall) string { return c.Status }, Equal("RUNNING"))))
+		// Wait for provisioning goroutine to register containers (makes GetStatus return RUNNING).
+		Eventually(func() v1alpha1.ThreeTierAppStatus {
+			resp, err := http.Get(srv.URL + "/api/v1alpha1/three-tier-apps/get-status-stack")
+			if err != nil || resp.StatusCode != http.StatusOK {
+				return v1alpha1.PENDING
+			}
+			var stack v1alpha1.ThreeTierApp
+			if err := json.NewDecoder(resp.Body).Decode(&stack); err != nil || stack.Status == nil {
+				return v1alpha1.PENDING
+			}
+			return *stack.Status
+		}, "2s", "10ms").Should(Equal(v1alpha1.RUNNING))
 	})
 
-	It("publishes DELETED on delete when status reporter is set", func() {
+	It("deletes a 3-tier app (no status event published)", func() {
 		req := v1alpha1.ThreeTierApp{
 			Metadata: v1alpha1.ThreeTierAppMetadata{Name: "del-stack"},
 			Spec: v1alpha1.ThreeTierSpec{
@@ -206,13 +225,18 @@ var _ = Describe("Handlers with MockClient and status reporting", func() {
 		_, err := http.Post(srv.URL+"/api/v1alpha1/three-tier-apps", "application/json", bytes.NewReader(body))
 		Expect(err).NotTo(HaveOccurred())
 
+		// Wait for provisioning so the entry exists in the store before deleting.
+		Eventually(func() int {
+			resp, _ := http.Get(srv.URL + "/api/v1alpha1/three-tier-apps/del-stack")
+			return resp.StatusCode
+		}, "2s", "10ms").Should(Equal(http.StatusOK))
+
 		delReq, _ := http.NewRequest(http.MethodDelete, srv.URL+"/api/v1alpha1/three-tier-apps/del-stack", nil)
 		resp, err := http.DefaultClient.Do(delReq)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(resp.StatusCode).To(Equal(http.StatusNoContent))
 
-		deleted := reporter.getDeletedCalls()
-		Expect(deleted).To(Equal([]string{"del-stack"}))
+		Expect(reporter.getDeletedCalls()).To(BeEmpty())
 	})
 
 	It("returns status from MockClient on List", func() {
@@ -228,15 +252,20 @@ var _ = Describe("Handlers with MockClient and status reporting", func() {
 		_, err := http.Post(srv.URL+"/api/v1alpha1/three-tier-apps", "application/json", bytes.NewReader(body))
 		Expect(err).NotTo(HaveOccurred())
 
-		resp, err := http.Get(srv.URL + "/api/v1alpha1/three-tier-apps")
-		Expect(err).NotTo(HaveOccurred())
-		Expect(resp.StatusCode).To(Equal(http.StatusOK))
-
-		var list v1alpha1.ThreeTierAppList
-		Expect(json.NewDecoder(resp.Body).Decode(&list)).To(Succeed())
-		Expect(list.ThreeTierApps).NotTo(BeNil())
-		Expect(*list.ThreeTierApps).To(HaveLen(1))
-		Expect((*list.ThreeTierApps)[0].Status).To(HaveValue(Equal(v1alpha1.RUNNING)))
+		// Wait for provisioning goroutine so GetStatus returns RUNNING.
+		Eventually(func() v1alpha1.ThreeTierAppStatus {
+			resp, err := http.Get(srv.URL + "/api/v1alpha1/three-tier-apps")
+			if err != nil || resp.StatusCode != http.StatusOK {
+				return v1alpha1.PENDING
+			}
+			var list v1alpha1.ThreeTierAppList
+			if err := json.NewDecoder(resp.Body).Decode(&list); err != nil ||
+				list.ThreeTierApps == nil || len(*list.ThreeTierApps) == 0 ||
+				(*list.ThreeTierApps)[0].Status == nil {
+				return v1alpha1.PENDING
+			}
+			return *(*list.ThreeTierApps)[0].Status
+		}, "2s", "10ms").Should(Equal(v1alpha1.RUNNING))
 	})
 })
 
@@ -250,7 +279,7 @@ var _ = Describe("Handlers status consistency (configurable client)", func() {
 	BeforeEach(func() {
 		reporter = &mockStatusReporter{}
 		client = &statusOverrideClient{inner: &containerclient.MockClient{}}
-		svc := service.New(store.NewMemoryStore(), client, reporter)
+		svc := service.New(newTestStore(), client, reporter)
 		h := &handlers.Handlers{Svc: svc}
 		r := chi.NewRouter()
 		_ = server.HandlerFromMuxWithBaseURL(server.NewStrictHandler(h, nil), r, "/api/v1alpha1")
@@ -263,7 +292,7 @@ var _ = Describe("Handlers status consistency (configurable client)", func() {
 		}
 	})
 
-	It("returns FAILED and publishes FAILED when container status is FAILED", func() {
+	It("returns FAILED when container status is FAILED", func() {
 		req := v1alpha1.ThreeTierApp{
 			Metadata: v1alpha1.ThreeTierAppMetadata{Name: "fail-stack"},
 			Spec: v1alpha1.ThreeTierSpec{
@@ -276,6 +305,12 @@ var _ = Describe("Handlers status consistency (configurable client)", func() {
 		_, err := http.Post(srv.URL+"/api/v1alpha1/three-tier-apps", "application/json", bytes.NewReader(body))
 		Expect(err).NotTo(HaveOccurred())
 
+		// Wait for provisioning goroutine to finish before overriding status.
+		Eventually(func() int {
+			resp, _ := http.Get(srv.URL + "/api/v1alpha1/three-tier-apps/fail-stack")
+			return resp.StatusCode
+		}, "2s", "10ms").Should(Equal(http.StatusOK))
+
 		client.setStatus("fail-stack", v1alpha1.FAILED)
 
 		resp, err := http.Get(srv.URL + "/api/v1alpha1/three-tier-apps/fail-stack")
@@ -285,12 +320,9 @@ var _ = Describe("Handlers status consistency (configurable client)", func() {
 		var stack v1alpha1.ThreeTierApp
 		Expect(json.NewDecoder(resp.Body).Decode(&stack)).To(Succeed())
 		Expect(stack.Status).To(HaveValue(Equal(v1alpha1.FAILED)))
-
-		calls := reporter.getPublishCalls()
-		Expect(calls).To(ContainElement(WithTransform(func(c publishCall) string { return c.Status }, Equal("FAILED"))))
 	})
 
-	It("returns PENDING and publishes PENDING when container status is PENDING", func() {
+	It("returns PENDING when container status is PENDING", func() {
 		req := v1alpha1.ThreeTierApp{
 			Metadata: v1alpha1.ThreeTierAppMetadata{Name: "pending-stack"},
 			Spec: v1alpha1.ThreeTierSpec{
@@ -303,6 +335,12 @@ var _ = Describe("Handlers status consistency (configurable client)", func() {
 		_, err := http.Post(srv.URL+"/api/v1alpha1/three-tier-apps", "application/json", bytes.NewReader(body))
 		Expect(err).NotTo(HaveOccurred())
 
+		// Wait for provisioning goroutine to finish before overriding status.
+		Eventually(func() int {
+			resp, _ := http.Get(srv.URL + "/api/v1alpha1/three-tier-apps/pending-stack")
+			return resp.StatusCode
+		}, "2s", "10ms").Should(Equal(http.StatusOK))
+
 		client.setStatus("pending-stack", v1alpha1.PENDING)
 
 		resp, err := http.Get(srv.URL + "/api/v1alpha1/three-tier-apps/pending-stack")
@@ -312,8 +350,5 @@ var _ = Describe("Handlers status consistency (configurable client)", func() {
 		var stack v1alpha1.ThreeTierApp
 		Expect(json.NewDecoder(resp.Body).Decode(&stack)).To(Succeed())
 		Expect(stack.Status).To(HaveValue(Equal(v1alpha1.PENDING)))
-
-		calls := reporter.getPublishCalls()
-		Expect(calls).To(ContainElement(WithTransform(func(c publishCall) string { return c.Status }, Equal("PENDING"))))
 	})
 })

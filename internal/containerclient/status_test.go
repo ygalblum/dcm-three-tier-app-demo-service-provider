@@ -109,12 +109,11 @@ var _ = Describe("MockClient GetStatus consistency", func() {
 
 	It("returns RUNNING for created stack", func() {
 		m := &containerclient.MockClient{}
-		_, _, _, err := m.CreateContainers(context.Background(), "s1", v1alpha1.ThreeTierSpec{
+		Expect(m.CreateContainers(context.Background(), "s1", v1alpha1.ThreeTierSpec{
 			Database: v1alpha1.DatabaseTierSpec{Engine: "postgres", Version: "16"},
 			App:      v1alpha1.AppTierSpec{Image: "app:latest"},
 			Web:      v1alpha1.WebTierSpec{Image: "nginx:alpine"},
-		})
-		Expect(err).NotTo(HaveOccurred())
+		})).To(Succeed())
 		s, ok := m.GetStatus(context.Background(), "s1")
 		Expect(ok).To(BeTrue())
 		Expect(s).To(Equal(v1alpha1.RUNNING))
@@ -122,12 +121,11 @@ var _ = Describe("MockClient GetStatus consistency", func() {
 
 	It("returns FAILED for stack after delete", func() {
 		m := &containerclient.MockClient{}
-		_, _, _, err := m.CreateContainers(context.Background(), "s1", v1alpha1.ThreeTierSpec{
+		Expect(m.CreateContainers(context.Background(), "s1", v1alpha1.ThreeTierSpec{
 			Database: v1alpha1.DatabaseTierSpec{Engine: "postgres", Version: "16"},
 			App:      v1alpha1.AppTierSpec{Image: "app:latest"},
 			Web:      v1alpha1.WebTierSpec{Image: "nginx:alpine"},
-		})
-		Expect(err).NotTo(HaveOccurred())
+		})).To(Succeed())
 		Expect(m.DeleteContainers(context.Background(), "s1")).To(Succeed())
 		s, ok := m.GetStatus(context.Background(), "s1")
 		Expect(ok).To(BeTrue())

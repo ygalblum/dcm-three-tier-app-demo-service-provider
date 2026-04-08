@@ -12,8 +12,8 @@ import (
 	"github.com/dcm-project/3-tier-demo-service-provider/internal/containerclient"
 )
 
-func testStackDB() config.StackDBConfig {
-	return config.StackDBConfig{
+func testStackDB() config.StackDBCfg {
+	return config.StackDBCfg{
 		Password:     "petclinic",
 		DatabaseName: "petclinic",
 		PostgresUser: "postgres",
@@ -51,20 +51,13 @@ var _ = Describe("HTTPClient", func() {
 			}
 		})
 
-		It("creates three containers and returns correct IDs", func() {
-			dbID, appID, webID, err := client.CreateContainers(ctx, "stack1", spec)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(dbID).To(Equal("stack1-db"))
-			Expect(appID).To(Equal("stack1-app"))
-			Expect(webID).To(Equal("stack1-web"))
+		It("creates three containers successfully", func() {
+			Expect(client.CreateContainers(ctx, "stack1", spec)).To(Succeed())
 		})
 
 		It("returns ErrConflict when containers already exist", func() {
-			_, _, _, err := client.CreateContainers(ctx, "stack1", spec)
-			Expect(err).NotTo(HaveOccurred())
-
-			_, _, _, err = client.CreateContainers(ctx, "stack1", spec)
-			Expect(err).To(MatchError(containerclient.ErrConflict))
+			Expect(client.CreateContainers(ctx, "stack1", spec)).To(Succeed())
+			Expect(client.CreateContainers(ctx, "stack1", spec)).To(MatchError(containerclient.ErrConflict))
 		})
 	})
 
@@ -75,8 +68,7 @@ var _ = Describe("HTTPClient", func() {
 				App:      v1alpha1.AppTierSpec{Image: "spring-petclinic:latest"},
 				Web:      v1alpha1.WebTierSpec{Image: "nginx:alpine"},
 			}
-			_, _, _, err := client.CreateContainers(ctx, "stack1", spec)
-			Expect(err).NotTo(HaveOccurred())
+			Expect(client.CreateContainers(ctx, "stack1", spec)).To(Succeed())
 
 			Expect(client.DeleteContainers(ctx, "stack1")).To(Succeed())
 		})
@@ -104,8 +96,7 @@ var _ = Describe("HTTPClient", func() {
 				},
 				Web: v1alpha1.WebTierSpec{Image: "nginx:alpine"},
 			}
-			_, _, _, err := client.CreateContainers(ctx, "stack2", spec)
-			Expect(err).NotTo(HaveOccurred())
+			Expect(client.CreateContainers(ctx, "stack2", spec)).To(Succeed())
 		})
 	})
 })
