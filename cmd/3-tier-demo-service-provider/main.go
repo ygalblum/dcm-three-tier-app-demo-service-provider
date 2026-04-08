@@ -73,7 +73,10 @@ func run() error {
 	r := chi.NewRouter()
 	_ = server.HandlerFromMuxWithBaseURL(server.NewStrictHandler(h, nil), r, "/api/v1alpha1")
 
-	srv := apiserver.New(cfg.SVCAddress, r, logger)
+	srv, err := apiserver.New(cfg.SVCAddress, r, logger)
+	if err != nil {
+		return fmt.Errorf("creating server: %w", err)
+	}
 
 	if cfg.RegistrationEnabled() {
 		registrar, err := registration.NewRegistrar(&cfg, logger)

@@ -10,6 +10,9 @@ import (
 	"net/http"
 	"runtime/debug"
 	"time"
+
+	v1alpha1 "github.com/dcm-project/3-tier-demo-service-provider/api/v1alpha1"
+	oapimiddleware "github.com/oapi-codegen/nethttp-middleware"
 )
 
 const (
@@ -26,18 +29,31 @@ type Server struct {
 	onReady func(context.Context)
 }
 
-// New creates a new Server wrapping the given handler with recovery and
-// request-logging middleware.
-func New(addr string, handler http.Handler, logger *slog.Logger) *Server {
+// New creates a new Server wrapping the given handler with recovery,
+// request-logging, and OpenAPI request validation middleware.
+func New(addr string, handler http.Handler, logger *slog.Logger) (*Server, error) {
+	swagger, err := v1alpha1.GetSwagger()
+	if err != nil {
+		return nil, fmt.Errorf("loading OpenAPI spec: %w", err)
+	}
+	// Disable server URL validation so the middleware works regardless of host/port.
+	swagger.Servers = nil
+
+	validate := oapimiddleware.OapiRequestValidatorWithOptions(swagger, &oapimiddleware.Options{
+		ErrorHandler: func(w http.ResponseWriter, message string, statusCode int) {
+			http.Error(w, message, statusCode)
+		},
+	})
+
 	mux := http.NewServeMux()
-	mux.Handle("/", recoveryMiddleware(logger)(requestLoggingMiddleware(logger)(handler)))
+	mux.Handle("/", recoveryMiddleware(logger)(requestLoggingMiddleware(logger)(validate(handler))))
 	return &Server{
 		logger: logger,
 		srv: &http.Server{
 			Addr:    addr,
 			Handler: mux,
 		},
-	}
+	}, nil
 }
 
 // WithOnReady registers a callback invoked once the server is confirmed ready.

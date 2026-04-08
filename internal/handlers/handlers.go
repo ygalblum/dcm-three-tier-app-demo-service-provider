@@ -36,7 +36,7 @@ func (h *Handlers) GetHealth(_ context.Context, _ server.GetHealthRequestObject)
 
 func (h *Handlers) ListThreeTierApps(ctx context.Context, req server.ListThreeTierAppsRequestObject) (server.ListThreeTierAppsResponseObject, error) {
 	maxPageSize := int32(50)
-	if req.Params.MaxPageSize != nil && *req.Params.MaxPageSize >= 1 && *req.Params.MaxPageSize <= 100 {
+	if req.Params.MaxPageSize != nil {
 		maxPageSize = *req.Params.MaxPageSize
 	}
 
