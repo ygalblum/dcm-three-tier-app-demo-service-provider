@@ -20,9 +20,9 @@ type Config struct {
 	// avoiding conflicts with other services (ygalblum).
 	PodmanWebHostPort string         `env:"PODMAN_WEB_HOST_PORT"`
 	StackDB           StackDBCfg     `envPrefix:"TIER_STACK_"`
-	DCM               DCMConfig      `envPrefix:"SP_DCM_"`
+	Provider          ProviderConfig `envPrefix:"SP_"`
+	DCM               DCMConfig      `envPrefix:"DCM_"`
 	NATS              NATSConfig     `envPrefix:"SP_NATS_"`
-	Provider          ProviderConfig `envPrefix:"SP_PROVIDER_"`
 	Store             StoreConfig    `envPrefix:"DB_"`
 }
 
