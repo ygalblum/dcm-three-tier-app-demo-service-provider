@@ -77,7 +77,7 @@ app, browser access, delete, stop).
 | `TIER_STACK_DB_PASSWORD` | DB password | `petclinic` |
 | `TIER_STACK_DB_NAME` | DB name | `petclinic` |
 | `TIER_STACK_POSTGRES_USER` / `TIER_STACK_MYSQL_USER` | JDBC user | `postgres` / `root` |
-| `SP_DCM_REGISTRATION_URL`, `SP_PROVIDER_NAME`, `SP_PROVIDER_ENDPOINT` | Self-registration | (empty) |
+| `DCM_REGISTRATION_URL`, `SP_NAME`, `SP_ENDPOINT` | Self-registration | (empty) |
 | `STATUS_REPORT_URL` | CloudEvents endpoint for DCM | (empty) |
 
 Optional **`.env`** in the working directory: `cp .env.example .env` (not
